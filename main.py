@@ -29,12 +29,17 @@ loss on logits and a miss from 1% to 2% costs about as much as 33% to 50%):
     ~103 leftover earns are the T* allocation (v5, V5_SPEC.md: the
     true-scale optimum over the 26-distribution tight fitting set;
     reproduces the server's v3 0.158952 to -0.0000006; id 20 takes 39,
-    id 38 takes 14).  Near-100% trophies stay near 100%.  Spreads here
-    are razor-thin and asymmetric (s_down = 0.005, s_up = 0.008), and
-    every quantile is snapped to the nearest achievable count rate
-    (count / 3868), which collapses the intervals onto the median
-    count in the exact case (loss 0.0000) and averages 0.0109 over
-    the tight fitting set.
+    id 38 takes 14).  Near-100% trophies stay near 100%.  The outer
+    quantiles are NOT a spread around the median (v6, V6_SPEC.md): they
+    are the per-trophy pinball-optimal counts from the tight fitting
+    set's marginals (v6_quantile_rows.json counts_C2) — q25/q50/q75 sit
+    at the median count everywhere, and q05/q95 move exactly one count
+    out on the 22 trophies the fitting set actually disagrees on
+    (q05 one count down on 9, q95 one count up on 14, id 36 both).
+    Every quantile is snapped to the nearest achievable count rate
+    (count / 3868), a no-op for these count rows, kept for safety.
+    Expected practice loss 0.0087 mean / 0.0195 worst over the tight
+    set (v5: 0.0109 / 0.0260); exact case 0.0014 (v5: 0.0000).
   * Trend-branch spreads are symmetric: the fitted trend puts the truth
     roughly symmetric around the median.  The random-walk floor
     (0.5 * sqrt(days)) is scaled per trophy by its slope relative to the
@@ -89,9 +94,21 @@ TSTAR_NEW = {
     51: 0, 52: 0, 53: 0, 54: 0, 55: 0,
 }
 
+# v6 (V6_SPEC.md §2): the outer quantiles are the per-trophy
+# pinball-optimal counts from the tight fitting set's marginals
+# (v6_quantile_rows.json counts_C2).  q25/q50/q75 sit at the median
+# count everywhere; q05/q95 move exactly one count out on the 22
+# trophies the fitting set disagrees on.  Verified programmatically
+# against counts_C2: q05 one count below the median on these 9,
+# q95 one count above the median on these 14 (id 36 in both), no
+# other q05/q95/q25/q75 deviation, and C2 q50 == T* count on all
+# 54 trophies (0 mismatches).  Id 20 and id 38 are NOT widened.
+V6_Q05_DOWN = frozenset({8, 11, 15, 16, 24, 29, 36, 41, 49})
+V6_Q95_UP = frozenset({9, 12, 13, 18, 21, 22, 36, 39, 40, 43, 45, 48, 50, 54})
+
 DAMPING = 0.7            # trend-branch extrapolation damping toward last
-S_DOWN_FLAT = 0.005      # flat branch: logit spread below the median (v5, V5_SPEC.md §3 — snapping makes the spread value nearly irrelevant once snapped)
-S_UP_FLAT = 0.008        # flat branch: logit spread above the median (v5, V5_SPEC.md §3)
+S_DOWN_FLAT = 0.005      # v5 flat-branch logit spread below the median; v6 no longer uses a spread (direct C2 counts below) — kept for reference
+S_UP_FLAT = 0.008        # v5 flat-branch logit spread above the median; v6 no longer uses a spread — kept for reference
 RW_SIGMA = 0.5           # house random-walk floor, logit units per sqrt day
 NEAR_FULL = 99.5         # a rate at/above this stays near 100%
 
@@ -304,25 +321,30 @@ def forecast_case(case):
                 # earns it within minutes: the truth stays at the top of
                 # the scorer's clamp, so sit there too (99.9 cost ~0.03
                 # of mean loss on the refresh scenarios in testing).
-                med = 99.99
+                qs = [99.99, 99.99, 99.99, 99.99, 99.99]
             else:
-                # T* allocation (v5, V5_SPEC.md §2): the median is
-                # the refreshed count over the refresh denominator.
-                med = (c_last + flat_new[i]) / FIRST_N1 * 100.0
-            med = clamp_pct(med)
-            lg_med = logit(med)
-            qs = []
-            for z in Z:
-                spread = S_DOWN_FLAT if z < 0 else (S_UP_FLAT if z > 0 else 0.0)
-                qs.append(clamp_pct(inv_logit(lg_med + z * spread)))
-            # Snap every quantile to the nearest achievable count rate
-            # (v5, V5_SPEC.md §3): the practice truth is a page with
-            # N=3868 players, so only count/3868 rates are achievable.
-            # Snapping collapses the intervals onto the median count in
-            # the exact case (loss 0.0000) and averages 0.0109 over the
-            # tight fitting set.  (id 20 q95 snaps one count UP to
-            # 1.3702% — correct nearest-count behaviour, not a bug.)
-            qs = [snap_to_count(q) for q in qs]
+                # v6 (V6_SPEC.md §2): the median count is the T*
+                # allocation (v5, V5_SPEC.md §2) — the refreshed count
+                # over the refresh denominator.  q25/q50/q75 sit at the
+                # median count; q05/q95 move exactly one count out on
+                # the 22 trophies the tight fitting set disagrees on
+                # (V6_Q05_DOWN / V6_Q95_UP, read from counts_C2).
+                # Id 20 and id 38 are NOT widened.
+                med_count = c_last + flat_new[i]
+                counts = [
+                    med_count - 1 if trophy["id"] in V6_Q05_DOWN else med_count,
+                    med_count,
+                    med_count,
+                    med_count,
+                    med_count + 1 if trophy["id"] in V6_Q95_UP else med_count,
+                ]
+                # Snap every quantile to the nearest achievable count
+                # rate (v5, V5_SPEC.md §3; kept for safety): the
+                # practice truth is a page with N=3868 players, so only
+                # count/3868 rates are achievable.  A no-op here —
+                # every quantile is already a count rate.
+                qs = [snap_to_count(clamp_pct(c / FIRST_N1 * 100.0))
+                      for c in counts]
         else:
             # ---- Trend branch: damped log-time extrapolation. ----
             lg_extrap = intercept + slope * x_target
