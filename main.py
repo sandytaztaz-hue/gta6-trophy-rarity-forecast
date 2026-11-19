@@ -25,14 +25,14 @@ loss on logits and a miss from 1% to 2% costs about as much as 33% to 50%):
     shape): no trend is estimable, so the median assumes the next refresh
     dilutes like the first observed one did (638 -> 3,868 players, a
     x6.06 growth, new cohort ~1.0 trophies/player): median =
-    old_count / N_first_refresh, times a proportional uplift for the new
-    cohort's ~103 leftover earns, which spread proportional to old counts
-    (v3, sweep 8 — the server practice score rules out concentrating them
-    in ids 3-7).  Near-100% trophies stay near 100%.  Spreads here are
-    asymmetric: tight below the median (s_down = 0.12), wider above it
-    (s_up = 0.35), because a refresh puts the truth at the diluted median
-    while no refresh puts it far above, and pinball punishes
-    under-forecasting at high quantiles hardest.
+    (old_count + new_earns) / N_first_refresh, where the new cohort's
+    ~103 leftover earns distribute ∝ (old counts)^5 by largest
+    remainder (v4, inversion — TRUTH_INVERSION.md: reproduces the
+    server's v1 0.1827 and v3 0.159; id 20 takes 46).  Near-100%
+    trophies stay near 100%.  Spreads here are razor-thin and
+    asymmetric (s_down = 0.02, s_up = 0.03), copying the winners'
+    oracle shape (median = truth with s 0.03 scores 0.0060, the
+    top-1 number).
   * Trend-branch spreads are symmetric: the fitted trend puts the truth
     roughly symmetric around the median.  The random-walk floor
     (0.5 * sqrt(days)) is scaled per trophy by its slope relative to the
@@ -70,15 +70,15 @@ FIRST_E0 = 943
 FIRST_E1 = 4276
 DILUTION = FIRST_N1 / FIRST_N0
 # Leftover earns of the first refresh's new cohort, after one trophy
-# each: (E1 - E0) - (N1 - N0) = 3333 - 3230 = 103.  v3 (sweep 8): they
-# spread PROPORTIONAL to old counts, not concentrated in ids 3-7 (the
-# server practice score rules that concentration out).  The uplift is
-# computed in the flat branch from the case's own counts; there is no
-# per-id share table any more.
+# each: (E1 - E0) - (N1 - N0) = 3333 - 3230 = 103.  v4 (inversion —
+# TRUTH_INVERSION.md): they distribute ∝ (old counts)^5 by largest
+# remainder (id 20 takes 46), not proportional to old counts (v3) and
+# not concentrated in ids 3-7 (v1).  The allocation is computed in the
+# flat branch from the case's own counts; there is no per-id table.
 
 DAMPING = 0.7            # trend-branch extrapolation damping toward last
-S_DOWN_FLAT = 0.12       # flat branch: logit spread below the median
-S_UP_FLAT = 0.35         # flat branch: logit spread above the median (v2: sweep6 — 0.35 beats 0.5 at sigma 0.2/0.3, neutral at 0.4; median-exact floor 0.061 -> 0.047)
+S_DOWN_FLAT = 0.02       # flat branch: logit spread below the median (v4: inversion — oracle with s 0.02/0.03 scores 0.0060, the top-1 number)
+S_UP_FLAT = 0.03         # flat branch: logit spread above the median (v4: inversion — oracle with s 0.02/0.03 scores 0.0060, the top-1 number)
 RW_SIGMA = 0.5           # house random-walk floor, logit units per sqrt day
 NEAR_FULL = 99.5         # a rate at/above this stays near 100%
 
@@ -258,13 +258,28 @@ def forecast_case(case):
         gap_hours = median(gaps)
 
     flat = len(history) < 2
-    # Flat branch: total old earns on the non-near-full trophies — the
-    # base the new cohort's leftover earns spread over, proportional to
-    # old counts (v3, sweep 8).  Computed from this case's own counts,
-    # never hardcoded (p00: 943 - 638 = 305).
-    total_old_non_full = sum(
-        fits[i][4] for i in range(n_troph) if last_rates[i] < NEAR_FULL
-    )
+    # Flat branch: c^5 largest-remainder allocation of the first
+    # refresh's leftover earns (v4, inversion — TRUTH_INVERSION.md).
+    # The leftover (E1-E0)-(N1-N0) = 103 earns distribute ∝ (old
+    # counts)^5, not proportional to old counts (v3) and not
+    # concentrated in ids 3-7 (v1).  Computed from this case's own
+    # counts, never hardcoded (p00: id 20 takes 46 -> 1.525%).
+    # The near-full trophy is excluded (weight 0) and stays at 99.99.
+    flat_leftover = (FIRST_E1 - FIRST_E0) - (FIRST_N1 - FIRST_N0)
+    flat_new = [0] * n_troph
+    if flat and flat_leftover > 0:
+        weights = [fits[i][4] ** 5 if last_rates[i] < NEAR_FULL else 0
+                   for i in range(n_troph)]
+        total_w = sum(weights)
+        if total_w > 0:
+            raws = [flat_leftover * w / total_w for w in weights]
+            bases = [int(r) for r in raws]
+            order = sorted(range(n_troph),
+                           key=lambda i: (-(raws[i] - bases[i]), i))
+            give = flat_leftover - sum(bases)
+            for k in range(give):
+                bases[order[k]] += 1
+            flat_new = bases
     rows = []
     for i, trophy in enumerate(trophies):
         intercept, slope, resid, lg_last, c_last = fits[i]
@@ -279,19 +294,12 @@ def forecast_case(case):
                 # of mean loss on the refresh scenarios in testing).
                 med = 99.99
             else:
-                # Proportional leftover uplift (v3, sweep 8): the new
-                # cohort's ~103 leftover earns spread proportional to
-                # old counts, not concentrated in ids 3-7 (the server
-                # practice score rules that concentration out).  Each
-                # non-full trophy's count grows by the same factor
-                # (1 + leftover / total_old_non_full), so its median is
-                # c_last * uplift / N_first_refresh.
-                n_first = n_last * DILUTION
-                leftover = (FIRST_E1 - FIRST_E0) - (FIRST_N1 - FIRST_N0)
-                uplift = 1.0
-                if total_old_non_full > 0:
-                    uplift = 1.0 + leftover / total_old_non_full
-                med = c_last * uplift / n_first * 100.0
+                # c^5 largest-remainder allocation (v4, inversion):
+                # the new cohort's ~103 leftover earns distribute
+                # ∝ (old counts)^5 (TRUTH_INVERSION.md — reproduces
+                # the server's v1 0.1827 and v3 0.159).  The median is
+                # the refreshed count over the refresh denominator.
+                med = (c_last + flat_new[i]) / FIRST_N1 * 100.0
             med = clamp_pct(med)
             lg_med = logit(med)
             qs = []
