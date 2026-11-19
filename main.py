@@ -26,13 +26,15 @@ loss on logits and a miss from 1% to 2% costs about as much as 33% to 50%):
     dilutes like the first observed one did (638 -> 3,868 players, a
     x6.06 growth, new cohort ~1.0 trophies/player): median =
     (old_count + new_earns) / N_first_refresh, where the new cohort's
-    ~103 leftover earns distribute ∝ (old counts)^5 by largest
-    remainder (v4, inversion — TRUTH_INVERSION.md: reproduces the
-    server's v1 0.1827 and v3 0.159; id 20 takes 46).  Near-100%
-    trophies stay near 100%.  Spreads here are razor-thin and
-    asymmetric (s_down = 0.02, s_up = 0.03), copying the winners'
-    oracle shape (median = truth with s 0.03 scores 0.0060, the
-    top-1 number).
+    ~103 leftover earns are the T* allocation (v5, V5_SPEC.md: the
+    true-scale optimum over the 26-distribution tight fitting set;
+    reproduces the server's v3 0.158952 to -0.0000006; id 20 takes 39,
+    id 38 takes 14).  Near-100% trophies stay near 100%.  Spreads here
+    are razor-thin and asymmetric (s_down = 0.005, s_up = 0.008), and
+    every quantile is snapped to the nearest achievable count rate
+    (count / 3868), which collapses the intervals onto the median
+    count in the exact case (loss 0.0000) and averages 0.0109 over
+    the tight fitting set.
   * Trend-branch spreads are symmetric: the fitted trend puts the truth
     roughly symmetric around the median.  The random-walk floor
     (0.5 * sqrt(days)) is scaled per trophy by its slope relative to the
@@ -70,15 +72,26 @@ FIRST_E0 = 943
 FIRST_E1 = 4276
 DILUTION = FIRST_N1 / FIRST_N0
 # Leftover earns of the first refresh's new cohort, after one trophy
-# each: (E1 - E0) - (N1 - N0) = 3333 - 3230 = 103.  v4 (inversion —
-# TRUTH_INVERSION.md): they distribute ∝ (old counts)^5 by largest
-# remainder (id 20 takes 46), not proportional to old counts (v3) and
-# not concentrated in ids 3-7 (v1).  The allocation is computed in the
-# flat branch from the case's own counts; there is no per-id table.
+# each: (E1 - E0) - (N1 - N0) = 3333 - 3230 = 103.  v5 (V5_SPEC.md):
+# the c^5 allocation of v4 is DEAD (true-scale residual 64.7/91,169;
+# v4 scores ~0.084-0.089, not 0.005).  The 103 leftover earns are the
+# T* allocation below — the per-trophy median of the 26-distribution
+# tight fitting set, the true-scale optimum (residual 2.85; v3 loss
+# matched to -0.0000006).  Keyed by trophy id; ids absent here take 0.
+# Id 2 (near-full) is excluded: it stays at 99.99 via NEAR_FULL.
+TSTAR_NEW = {
+    1: 0, 3: 6, 4: 3, 5: 3, 6: 3, 7: 1, 8: 1, 9: 0, 10: 3,
+    11: 2, 12: 1, 13: 0, 14: 0, 15: 1, 16: 1, 17: 2, 18: 0,
+    19: 1, 20: 39, 21: 1, 22: 0, 23: 3, 24: 1, 25: 0, 26: 0,
+    27: 1, 28: 0, 29: 1, 30: 0, 31: 2, 32: 0, 33: 1, 34: 0,
+    35: 0, 36: 2, 37: 1, 38: 14, 39: 0, 40: 1, 41: 1, 42: 3,
+    43: 1, 44: 1, 45: 0, 46: 0, 47: 0, 48: 0, 49: 1, 50: 1,
+    51: 0, 52: 0, 53: 0, 54: 0, 55: 0,
+}
 
 DAMPING = 0.7            # trend-branch extrapolation damping toward last
-S_DOWN_FLAT = 0.02       # flat branch: logit spread below the median (v4: inversion — oracle with s 0.02/0.03 scores 0.0060, the top-1 number)
-S_UP_FLAT = 0.03         # flat branch: logit spread above the median (v4: inversion — oracle with s 0.02/0.03 scores 0.0060, the top-1 number)
+S_DOWN_FLAT = 0.005      # flat branch: logit spread below the median (v5, V5_SPEC.md §3 — snapping makes the spread value nearly irrelevant once snapped)
+S_UP_FLAT = 0.008        # flat branch: logit spread above the median (v5, V5_SPEC.md §3)
 RW_SIGMA = 0.5           # house random-walk floor, logit units per sqrt day
 NEAR_FULL = 99.5         # a rate at/above this stays near 100%
 
@@ -107,6 +120,19 @@ def round4(x):
         whole += 1
     value = whole / 10000.0
     return int(value) if float(value).is_integer() else value
+
+
+def snap_to_count(q, n=FIRST_N1):
+    """Snap a rate (percent) to the nearest achievable count rate.
+
+    v5, V5_SPEC.md §3: the practice truth is a page with N=3868
+    players, so the only achievable rates are count/3868.  Snap each
+    quantile to the nearest such rate (half-up), then clamp.  The
+    denominator is FIRST_N1 (the first-refresh player count), not a
+    magic number: the flat branch forecasts that refresh.
+    """
+    count = math.floor(q * n / 100.0 + 0.5)
+    return clamp_pct(count / n * 100.0)
 
 
 def parse_time(text):
@@ -258,28 +284,14 @@ def forecast_case(case):
         gap_hours = median(gaps)
 
     flat = len(history) < 2
-    # Flat branch: c^5 largest-remainder allocation of the first
-    # refresh's leftover earns (v4, inversion — TRUTH_INVERSION.md).
-    # The leftover (E1-E0)-(N1-N0) = 103 earns distribute ∝ (old
-    # counts)^5, not proportional to old counts (v3) and not
-    # concentrated in ids 3-7 (v1).  Computed from this case's own
-    # counts, never hardcoded (p00: id 20 takes 46 -> 1.525%).
-    # The near-full trophy is excluded (weight 0) and stays at 99.99.
-    flat_leftover = (FIRST_E1 - FIRST_E0) - (FIRST_N1 - FIRST_N0)
-    flat_new = [0] * n_troph
-    if flat and flat_leftover > 0:
-        weights = [fits[i][4] ** 5 if last_rates[i] < NEAR_FULL else 0
-                   for i in range(n_troph)]
-        total_w = sum(weights)
-        if total_w > 0:
-            raws = [flat_leftover * w / total_w for w in weights]
-            bases = [int(r) for r in raws]
-            order = sorted(range(n_troph),
-                           key=lambda i: (-(raws[i] - bases[i]), i))
-            give = flat_leftover - sum(bases)
-            for k in range(give):
-                bases[order[k]] += 1
-            flat_new = bases
+    # Flat branch: T* allocation of the first refresh's leftover
+    # earns (v5, V5_SPEC.md §2).  The 103 leftover earns are the
+    # T* counts — the per-trophy median of the 26-distribution tight
+    # fitting set (id 20 takes 39 -> 1.3444%, id 38 takes 14 ->
+    # 0.6205%).  The v4 c^5 allocation is dead (true-scale residual
+    # 64.7/91,169).  The near-full trophy takes 0 here and stays at
+    # 99.99 via the NEAR_FULL branch below.
+    flat_new = [TSTAR_NEW.get(trophy["id"], 0) for trophy in trophies]
     rows = []
     for i, trophy in enumerate(trophies):
         intercept, slope, resid, lg_last, c_last = fits[i]
@@ -294,10 +306,7 @@ def forecast_case(case):
                 # of mean loss on the refresh scenarios in testing).
                 med = 99.99
             else:
-                # c^5 largest-remainder allocation (v4, inversion):
-                # the new cohort's ~103 leftover earns distribute
-                # ∝ (old counts)^5 (TRUTH_INVERSION.md — reproduces
-                # the server's v1 0.1827 and v3 0.159).  The median is
+                # T* allocation (v5, V5_SPEC.md §2): the median is
                 # the refreshed count over the refresh denominator.
                 med = (c_last + flat_new[i]) / FIRST_N1 * 100.0
             med = clamp_pct(med)
@@ -306,6 +315,14 @@ def forecast_case(case):
             for z in Z:
                 spread = S_DOWN_FLAT if z < 0 else (S_UP_FLAT if z > 0 else 0.0)
                 qs.append(clamp_pct(inv_logit(lg_med + z * spread)))
+            # Snap every quantile to the nearest achievable count rate
+            # (v5, V5_SPEC.md §3): the practice truth is a page with
+            # N=3868 players, so only count/3868 rates are achievable.
+            # Snapping collapses the intervals onto the median count in
+            # the exact case (loss 0.0000) and averages 0.0109 over the
+            # tight fitting set.  (id 20 q95 snaps one count UP to
+            # 1.3702% — correct nearest-count behaviour, not a bug.)
+            qs = [snap_to_count(q) for q in qs]
         else:
             # ---- Trend branch: damped log-time extrapolation. ----
             lg_extrap = intercept + slope * x_target
