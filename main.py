@@ -75,7 +75,7 @@ LEFTOVER_SHARES = {3: 0.40, 4: 0.25, 5: 0.15, 6: 0.10, 7: 0.10}
 
 DAMPING = 0.7            # trend-branch extrapolation damping toward last
 S_DOWN_FLAT = 0.12       # flat branch: logit spread below the median
-S_UP_FLAT = 0.5          # flat branch: logit spread above the median
+S_UP_FLAT = 0.35         # flat branch: logit spread above the median (v2: sweep6 — 0.35 beats 0.5 at sigma 0.2/0.3, neutral at 0.4; median-exact floor 0.061 -> 0.047)
 RW_SIGMA = 0.5           # house random-walk floor, logit units per sqrt day
 NEAR_FULL = 99.5         # a rate at/above this stays near 100%
 
